@@ -1,5 +1,6 @@
 from flask import Flask, g, jsonify, request
 from uuid import uuid4
+from time import strftime
 import sqlite3
 import os
 import binascii
@@ -8,6 +9,7 @@ app = Flask(__name__)
 
 DATABASE = './database.db'
 
+# START DATABASE RELATED METHODS #
 def dictFactory(cursor, row):
     d = {}
     for idx, col in enumerate(cursor.description):
@@ -26,7 +28,9 @@ def closeConnection(exception):
     db = getattr(g, '_database', None)
     if db is not None:
         db.close()
+# END DATABASE RELATED METHODS #
 
+# START UTILS METHODS #
 def accountExists(accountId):
     cur = getDb().cursor()
     cur.execute("SELECT * FROM accounts WHERE id = ?", (accountId,))
@@ -66,13 +70,14 @@ def performTransferImpl(fromAccount, toAccount, amount):
     if computeAccountBalance(fromAccount) < amount:
         return {
             'error': "Il saldo non è sufficiente per effettuare l'operazione richiesta"
-        }
+        }, 422
 
     transactionId = str(uuid4())
+    createdAt = strftime("%Y-%m-%d %H:%M:%S")
     cur = getDb().cursor()
     cur.execute(
-        "INSERT INTO transactions (id, account_from, account_to, type, amount) VALUES (?, ?, ?, ?, ?)",
-        (transactionId, fromAccount, toAccount, "transfer", amount)
+        "INSERT INTO transactions (id, account_from, account_to, type, amount, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (transactionId, fromAccount, toAccount, "transfer", amount, createdAt)
     )
     getDb().commit()
 
@@ -83,7 +88,9 @@ def performTransferImpl(fromAccount, toAccount, amount):
             toAccount: computeAccountBalance(toAccount)
         }
     }
+# END UTILS METHODS
 
+# START ROUTES METHODS
 @app.route("/api/account", methods=['GET'])
 def getAccountsList():
     cur = getDb().cursor()
@@ -97,29 +104,51 @@ def createAccount():
     cur = getDb().cursor()
     cur.execute("INSERT INTO accounts (id, name, surname) VALUES (?, ?, ?)", (id, request.json['name'], request.json['surname']))
     getDb().commit()
-    return id
+    return { 'id': id }
 
 @app.route("/api/account/", methods=['DELETE'])
 def deleteAccount():
-    # TODO: controllare se l'account esiste
+    accountId = request.args['id']
+
+    if not accountExists(accountId):
+        return {
+            'error': "Non esiste un account con l'id specificato"
+        }, 404
+
     cur = getDb().cursor()
-    cur.execute("DELETE FROM accounts WHERE id = ?", (request.args['id'],))
+    cur.execute("DELETE FROM accounts WHERE id = ?", (accountId,))
     getDb().commit()
     return ("", 204)
 
 @app.route("/api/account/<accountId>", methods=['GET'])
 def getAccount(accountId):
+    if not accountExists(accountId):
+        return {
+            'error': "Non esiste un account con l'id specificato"
+        }, 404
+
     cur = getDb().cursor()
     cur.execute("SELECT name, surname FROM accounts WHERE id = ?", (accountId,))
     account = cur.fetchone()
-    #cur.execute("SELECT ")
-    # TODO: aggiungere transazioni
-    return (jsonify(account | { 'transactions': [] }), { "X-Sistema-Bancario": account['name'] + ';' + account['surname']})
+
+    # select all the transaction fields if "detailed" URL param is set, or only the id otherwise
+    cur.execute("SELECT " + ('*' if 'detailed' in request.args else 'id') + " FROM transactions WHERE account_from = ? ORDER BY created_at", (accountId,))
+    transactions = cur.fetchall()
+
+    response = account | {
+        'balance': computeAccountBalance(accountId),
+        'transactions': transactions
+    }
+
+    headers = { "X-Sistema-Bancario": account['name'] + ';' + account['surname']}
+
+    return response, headers
 
 @app.route("/api/account/<accountId>", methods=['POST'])
 def performDeposit(accountId):
     cur = getDb().cursor()
     id = str(uuid4())
+    createdAt = strftime("%Y-%m-%d %H:%M:%S")
     amount = float(request.json['amount'])
     type = "deposit" if amount >= 0 else "withdrawal"
     amount = abs(amount)
@@ -138,8 +167,12 @@ def performDeposit(accountId):
         }, 422
 
     cur = getDb().cursor()
-    cur.execute("INSERT INTO transactions (id, account_from, type, amount) VALUES (?, ?, ?, ?)", (id, accountId, type, amount))
+    cur.execute(
+        "INSERT INTO transactions (id, account_from, type, amount, created_at) VALUES (?, ?, ?, ?, ?)",
+        (id, accountId, type, amount, createdAt)
+    )
     getDb().commit()
+
     return {
         'id': id,
         'balance': computeAccountBalance(accountId)
@@ -213,3 +246,4 @@ def divertTransfer():
         }, 404
 
     return performTransferImpl(row['account_to'], row['account_from'], row['amount'])
+# END ROUTES METHODS
