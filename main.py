@@ -1,11 +1,13 @@
 from flask import Flask, g, jsonify, request
 from uuid import uuid4
 from time import strftime
+from flask_cors import CORS
 import sqlite3
 import os
 import binascii
 
 app = Flask(__name__)
+CORS(app)
 
 DATABASE = './database.db'
 
